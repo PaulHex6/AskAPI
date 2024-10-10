@@ -68,15 +68,16 @@ def initialize_db():
     conn.close()
 
 # Function to add debug information to the debug output box
-def add_debug_info(info):
+def add_debug_info(info, attempt=None):
     if 'debug_output' not in st.session_state:
         st.session_state['debug_output'] = ''
+    prefix = f"Attempt {attempt}: " if attempt else ""
     # Check if info is a dictionary (API response) and format it
     if isinstance(info, dict):
         formatted_info = json.dumps(info, indent=2)
-        st.session_state['debug_output'] += f"{formatted_info}\n"
+        st.session_state['debug_output'] += f"{prefix}{formatted_info}\n"
     else:
-        st.session_state['debug_output'] += f"{info}\n"
+        st.session_state['debug_output'] += f"{prefix}{info}\n"
 
 # Helper Functions
 
@@ -87,7 +88,7 @@ def fetch_documentation_from_url(url):
     text = soup.get_text(separator='\n')
     return text
 
-#Send messages to the AIMLAPI GPT model and return the response.
+# Send messages to the OpenAI GPT model and return the response.
 def query_gpt(messages):
     global client
     with st.spinner('Processing, please wait...'):
@@ -165,15 +166,20 @@ def get_knowledge_base(api_id):
     conn.close()
     return result[0] if result else None
 
-def extract_parameters(user_query, knowledge_base):
-    """Use GPT to extract relevant API parameters based on the user's query."""
+def extract_parameters(user_query, knowledge_base, error_message=None):
+    """Use GPT to extract relevant API parameters based on the user's query and error feedback."""
     add_debug_info(f"User Query: {user_query}")
     add_debug_info(f"Knowledge Base: {json.dumps(knowledge_base, indent=2)}")
 
     combined_content = (
         "You are an AI assistant who translates user queries into API parameters.\n\n"
-        f"Given the following user query: '{user_query}', and API knowledge base: <knowledge>{json.dumps(knowledge_base, indent=2)}</knowledge>, extract the necessary API parameters in JSON format. Do not include 'method' or 'url' keys. Provide only the parameters required by the API."
+        f"Given the following user query: '{user_query}', and API knowledge base: <knowledge>{json.dumps(knowledge_base, indent=2)}</knowledge>.\n"
     )
+
+    if error_message:
+        combined_content += f"\nPreviously, the API returned the following error: '{error_message}'. Please adjust the parameters accordingly.\n"
+
+    combined_content += "Extract the necessary API parameters in JSON format. Do not include 'method' or 'url' keys. Provide only the parameters required by the API."
 
     messages = [
         {"role": "user", "content": combined_content}
@@ -223,14 +229,13 @@ def process_parameters(params):
 
 def create_api_call(knowledge_base, params):
     """Create the full API call based on the knowledge base and extracted parameters."""
-
     # Ensure the base_url and endpoint are available
     base_url = knowledge_base.get('base_url')
     endpoint = knowledge_base.get('endpoint', '')
 
     if not base_url:
         add_debug_info("Error: 'base_url' is missing from the knowledge base. Cannot make API call.")
-        return {"error": "Missing base_url"}
+        return {"success": False, "error": "Missing base_url"}
 
     # Construct the full API URL
     api_url = base_url + endpoint
@@ -251,17 +256,19 @@ def create_api_call(knowledge_base, params):
         elif method == 'POST':
             response = requests.post(api_url, headers=headers, json=processed_params)
         else:
-            return {"error": "Unsupported request method."}
+            return {"success": False, "error": "Unsupported request method."}
 
         # Raise an exception for HTTP errors (status codes 4xx or 5xx)
         response.raise_for_status()
 
         # Parse the response as JSON
-        return response.json()
+        api_response = response.json()
+        return {"success": True, "response": api_response}
 
     except requests.exceptions.RequestException as e:
-        add_debug_info(f"API request failed: {e}")
-        return {"error": f"API request failed: {str(e)}"}
+        error_message = f"API request failed: {str(e)}"
+        add_debug_info(error_message)
+        return {"success": False, "error": error_message}
 
 def summarize_response(user_query, api_response):
     """Summarize the API response into natural language using GPT, considering the user's initial query."""
@@ -289,23 +296,22 @@ def main():
         st.warning("Please enter your OpenAI API key in the sidebar to continue.")
         return
 
-    # Initialize AIMLAPI Client (use your own API key and endpoint)
+    # Initialize OpenAI Client (use your own API key)
     client = OpenAI(
         api_key=st.session_state['api_key'],
         base_url="https://api.aimlapi.com",
     )
 
     # Tabs for the app
-    tabs = ["Talk to API", "Manage APIs", "Search APIs", "Documentation"]
-    selected_tab = st.tabs(tabs)
+    tabs = st.tabs(["Talk to API", "Manage APIs", "Search APIs", "Documentation"])
 
-    with selected_tab[0]:
+    with tabs[0]:
         talk_to_api_tab()
-    with selected_tab[1]:
+    with tabs[1]:
         manage_apis_tab()
-    with selected_tab[2]:
+    with tabs[2]:
         search_apis_tab()
-    with selected_tab[3]:
+    with tabs[3]:
         documentation_tab()
 
 # Function for 'Talk to API' tab
@@ -328,43 +334,62 @@ def talk_to_api_tab():
         return  # Early exit if no APIs are available
 
     # Prompt to ask a query
-    user_query = st.text_input("Enter your query:", value=st.session_state['user_query'])
+    user_query = st.text_input("Enter your query:", value='', key='query_input')
     submit_query = st.button("Ask API")
 
     if submit_query:
-        # Update user query in session state
+        # Update user query in session state with the latest query
         st.session_state['user_query'] = user_query
 
-        # Clear debug output and previous response when a new query is submitted
+        # Clear previous debug output and response when a new query is submitted
         st.session_state['debug_output'] = ''
         st.session_state['api_response'] = None
 
-        if not user_query or not st.session_state['selected_api']:
-            st.warning("Please select an API and enter a query.")
-        else:
-            knowledge_base = get_knowledge_base(st.session_state['selected_api'])
-            if knowledge_base:
-                params = extract_parameters(user_query, knowledge_base)
-                api_response = create_api_call(knowledge_base, params)
-                st.session_state['api_response'] = api_response  # Store in session state
+        max_attempts = 3
+        attempt = 0
+        error_message = None  # Initialize error_message
+        api_response = None  # Initialize the API response for success tracking
 
-                if "error" not in api_response:
-                    summary = summarize_response(user_query, api_response)
-                    st.write("**Response:**")
-                    st.write(summary)
-                else:
-                    st.error(f"Error: {api_response.get('error', 'Unknown error')}")
+        while attempt < max_attempts:
+            attempt += 1
+            add_debug_info(f"Attempt {attempt} of {max_attempts}", attempt)
 
-                # Append Raw API Response to Debug Output
-                add_debug_info("Raw API Response:")
-                add_debug_info(api_response)
+            if not user_query or not st.session_state['selected_api']:
+                st.warning("Please select an API and enter a query.")
+                break
             else:
-                st.error("Knowledge base not found or invalid for the selected API.")
+                knowledge_base = get_knowledge_base(st.session_state['selected_api'])
+                if knowledge_base:
+                    # Pass the error_message to extract_parameters
+                    params = extract_parameters(user_query, knowledge_base, error_message=error_message)
+                    api_result = create_api_call(knowledge_base, params)
 
-    # Display debug info using expander
-    if st.session_state.get('debug_output'):
-        with st.expander("Show Debug Output"):
-            st.text_area("Debug Output", st.session_state['debug_output'], height=400)
+                    if api_result["success"]:
+                        api_response = api_result["response"]
+                        st.session_state['api_response'] = api_response  # Store in session state
+
+                        summary = summarize_response(user_query, api_response)
+                        st.write("**Response:**")
+                        st.write(summary)
+                        break  # Exit the loop on success
+                    else:
+                        # Update error_message with the latest error
+                        error_message = api_result.get("error", "Unknown error")
+                        add_debug_info(f"Error encountered on attempt {attempt}: {error_message}", attempt)
+
+                        if attempt == max_attempts:
+                            st.error(f"Maximum number of attempts reached. Final error: {error_message}")
+                else:
+                    st.error("Knowledge base not found or invalid for the selected API.")
+                    break  # Exit the loop if knowledge base is invalid
+
+        # Display debug info using expander
+        if st.session_state.get('debug_output'):
+            with st.expander("Show Debug Output"):
+                st.text_area("Debug Output", st.session_state['debug_output'], height=400)
+
+    # Reset the query input field after submission to allow new query
+    st.session_state['user_query'] = ''  # Clear user query after submission
 
 # Function for 'Manage APIs' tab
 def manage_apis_tab():
@@ -382,7 +407,9 @@ def manage_apis_tab():
     # Display available APIs
     api_list = get_api_list()
     if api_list:
-        st.dataframe(api_list)
+        # Create a dataframe-like structure with the API list
+        formatted_api_list = [{"ID": api[0], "URL": api[1]} for api in api_list]
+        st.dataframe(formatted_api_list)
 
 # Function for 'Search APIs' tab
 def search_apis_tab():
