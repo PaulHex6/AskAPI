@@ -87,14 +87,15 @@ def fetch_documentation_from_url(url):
     text = soup.get_text(separator='\n')
     return text
 
+#Send messages to the AIMLAPI GPT model and return the response.
 def query_gpt(messages):
     global client
-    """Send messages to the AIMLAPI GPT model and return the response."""
-    response = client.chat.completions.create(
-        model="o1-mini",
-        messages=messages,
-        max_tokens=10000
-    )
+    with st.spinner('Processing, please wait...'):
+        response = client.chat.completions.create(
+            model="o1-mini",
+            messages=messages,
+            max_tokens=10000
+        )
     return response.choices[0].message.content.strip()
 
 def build_knowledge_base(doc_text):
