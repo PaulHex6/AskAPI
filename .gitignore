@@ -1,0 +1,27 @@
+# Ignore Python cache and bytecode files
+__pycache__/
+*.py[cod]
+
+# Ignore environment variables and configuration files
+.env
+
+# Ignore Docker generated files
+docker-compose.yml
+**/.dockerignore
+
+# Ignore Docker data
+docker_data/
+
+# Ignore log files
+*.log
+
+# Ignore virtual environments
+venv/
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore OS-generated files
+.DS_Store
+Thumbs.db
+test*
