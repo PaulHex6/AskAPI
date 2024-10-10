@@ -42,6 +42,31 @@ if not st.session_state['api_key']:
         placeholder="sk-..."
     )
 
+# Register JSON adapter and converter for SQLite
+def adapt_json(data):
+    return json.dumps(data)
+
+def convert_json(text):
+    return json.loads(text)
+
+sqlite3.register_adapter(dict, adapt_json)
+sqlite3.register_converter("JSON", convert_json)
+
+# Function to initialize the database and create the 'apis' table
+def initialize_db():
+    """Initialize the database and create the 'apis' table if it doesn't exist."""
+    conn = sqlite3.connect('apis.db', detect_types=sqlite3.PARSE_DECLTYPES)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS apis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT,
+            knowledge_base JSON
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
 # Function to add debug information to the debug output box
 def add_debug_info(info):
     if 'debug_output' not in st.session_state:
@@ -103,15 +128,21 @@ def build_knowledge_base(doc_text):
         knowledge_base = json.loads(knowledge_base_str)
     except json.JSONDecodeError as e:
         add_debug_info(f"Error parsing JSON from GPT response: {e}")
-        knowledge_base = {}
+        knowledge_base = None
+        return None
+
+    # Check if 'base_url' is in knowledge_base
+    if 'base_url' not in knowledge_base:
+        add_debug_info("Error: 'base_url' is missing from the knowledge base.")
+        knowledge_base = None
 
     return knowledge_base
 
 def save_api_to_db(api_url, knowledge_base):
     """Save the API URL and knowledge base to the SQLite database."""
-    conn = sqlite3.connect('apis.db')
+    conn = sqlite3.connect('apis.db', detect_types=sqlite3.PARSE_DECLTYPES)
     c = conn.cursor()
-    c.execute("INSERT INTO apis (url, knowledge_base) VALUES (?, ?)", (api_url, json.dumps(knowledge_base)))
+    c.execute("INSERT INTO apis (url, knowledge_base) VALUES (?, ?)", (api_url, knowledge_base))
     conn.commit()
     conn.close()
 
@@ -126,12 +157,12 @@ def get_api_list():
 
 def get_knowledge_base(api_id):
     """Retrieve the knowledge base of a specific API from the database."""
-    conn = sqlite3.connect('apis.db')
+    conn = sqlite3.connect('apis.db', detect_types=sqlite3.PARSE_DECLTYPES)
     c = conn.cursor()
     c.execute("SELECT knowledge_base FROM apis WHERE id = ?", (api_id,))
     result = c.fetchone()
     conn.close()
-    return json.loads(result[0]) if result else None
+    return result[0] if result else None
 
 def extract_parameters(user_query, knowledge_base):
     """Use GPT to extract relevant API parameters based on the user's query."""
@@ -139,8 +170,8 @@ def extract_parameters(user_query, knowledge_base):
     add_debug_info(f"Knowledge Base: {json.dumps(knowledge_base, indent=2)}")
 
     combined_content = (
-        "You are an AI assistant who translates user query to API parameters.\n\n"
-        f"Given the following user query: '{user_query}', and API knowledge base: <knowledge>{json.dumps(knowledge_base, indent=2)}</knowledge>, extract the necessary API parameters in JSON format."
+        "You are an AI assistant who translates user queries into API parameters.\n\n"
+        f"Given the following user query: '{user_query}', and API knowledge base: <knowledge>{json.dumps(knowledge_base, indent=2)}</knowledge>, extract the necessary API parameters in JSON format. Do not include 'method' or 'url' keys. Provide only the parameters required by the API."
     )
 
     messages = [
@@ -178,43 +209,54 @@ def extract_parameters(user_query, knowledge_base):
         add_debug_info(f"Error parsing JSON: {e}")
         return {}
 
+def process_parameters(params):
+    """Process parameters to ensure they are formatted correctly for the API call."""
+    processed_params = {}
+    for key, value in params.items():
+        if isinstance(value, list):
+            # Convert lists to comma-separated strings
+            processed_params[key] = ','.join(map(str, value))
+        else:
+            processed_params[key] = value
+    return processed_params
+
 def create_api_call(knowledge_base, params):
     """Create the full API call based on the knowledge base and extracted parameters."""
 
-    # Debugging: Ensure the base_url is available
+    # Ensure the base_url and endpoint are available
     base_url = knowledge_base.get('base_url')
+    endpoint = knowledge_base.get('endpoint', '')
 
     if not base_url:
         add_debug_info("Error: 'base_url' is missing from the knowledge base. Cannot make API call.")
         return {"error": "Missing base_url"}
 
+    # Construct the full API URL
+    api_url = base_url + endpoint
+
     method = knowledge_base.get('request_methods', ['GET'])[0].upper()
     headers = knowledge_base.get('headers', {})
 
-    # Use the extracted 'params' as the query parameters in the API call
-    query_params = params  # Using the extracted parameters directly
-    body = params.get('body', {})
+    # Process parameters to ensure correct formatting
+    processed_params = process_parameters(params)
 
-    add_debug_info(f"Making {method} request to {base_url} with params: {query_params} and body: {body}")
+    # Include 'body' in the debug message
+    add_debug_info(f"Making {method} request to {api_url} with params: {processed_params}")
 
     try:
         # Handle GET and POST requests based on the method specified
         if method == 'GET':
-            api_url = base_url
-            response = requests.get(api_url, headers=headers, params=query_params)
+            response = requests.get(api_url, headers=headers, params=processed_params)
         elif method == 'POST':
-            api_url = base_url
-            response = requests.post(api_url, headers=headers, json=body)
+            response = requests.post(api_url, headers=headers, json=processed_params)
         else:
             return {"error": "Unsupported request method."}
 
-        # Even if Content-Type is not application/json, try to manually parse the response as JSON
-        try:
-            return response.json()
-        except ValueError:
-            # If JSON parsing fails, return the raw text response
-            add_debug_info(f"Manual JSON parsing: Response is not in JSON format, but content looks like JSON.")
-            return {"error": "Response is not in JSON format.", "raw_response": response.text}
+        # Raise an exception for HTTP errors (status codes 4xx or 5xx)
+        response.raise_for_status()
+
+        # Parse the response as JSON
+        return response.json()
 
     except requests.exceptions.RequestException as e:
         add_debug_info(f"API request failed: {e}")
@@ -237,6 +279,9 @@ def summarize_response(user_query, api_response):
 def main():
     global client  # Use the global client variable
     st.title("⚡ AskAPI")
+
+    # Initialize the database
+    initialize_db()
 
     # Check if API key is set
     if not st.session_state['api_key']:
@@ -264,8 +309,6 @@ def main():
 
 # Function for 'Talk to API' tab
 def talk_to_api_tab():
-    st.header("Talk to API")
-
     # Initialize session state variables if not already set
     if 'api_response' not in st.session_state:
         st.session_state['api_response'] = None
@@ -281,10 +324,11 @@ def talk_to_api_tab():
         st.session_state['selected_api'] = api_selection[0]
     else:
         st.info("No APIs available. Please add one in the 'Manage APIs' tab.")
+        return  # Early exit if no APIs are available
 
     # Prompt to ask a query
     user_query = st.text_input("Enter your query:", value=st.session_state['user_query'])
-    submit_query = st.button("Submit Query")
+    submit_query = st.button("Ask API")
 
     if submit_query:
         # Update user query in session state
@@ -313,6 +357,8 @@ def talk_to_api_tab():
                 # Append Raw API Response to Debug Output
                 add_debug_info("Raw API Response:")
                 add_debug_info(api_response)
+            else:
+                st.error("Knowledge base not found or invalid for the selected API.")
 
     # Display debug info using expander
     if st.session_state.get('debug_output'):
@@ -321,15 +367,16 @@ def talk_to_api_tab():
 
 # Function for 'Manage APIs' tab
 def manage_apis_tab():
-    st.header("Manage APIs")
-
     # Add new API
     new_api_url = st.text_input("Enter API documentation URL:")
     if st.button("Add API"):
         doc_text = fetch_documentation_from_url(new_api_url)
         knowledge_base = build_knowledge_base(doc_text)
-        save_api_to_db(new_api_url, knowledge_base)
-        st.success(f"Added API: {new_api_url}")
+        if knowledge_base:
+            save_api_to_db(new_api_url, knowledge_base)
+            st.success(f"Added API: {new_api_url}")
+        else:
+            st.error("Failed to build knowledge base. Ensure the API documentation contains the base URL.")
 
     # Display available APIs
     api_list = get_api_list()
@@ -338,25 +385,33 @@ def manage_apis_tab():
 
 # Function for 'Search APIs' tab
 def search_apis_tab():
-    st.header("Search APIs")
     search_query = st.text_input("Search for APIs:")
     if search_query:
         api_list = get_api_list()
-        st.write(f"Search results for '{search_query}':")
-        for api in api_list:
-            if search_query.lower() in api[1].lower():
+        search_results = [api for api in api_list if search_query.lower() in api[1].lower()]
+        if search_results:
+            st.write(f"Search results for '{search_query}':")
+            for api in search_results:
                 st.write(api[1])
+        else:
+            st.info("No APIs match your search query.")
     else:
-        st.info("No APIs added yet.")
+        st.info("Enter a search query to find APIs.")
 
 # Function for 'Documentation' tab
 def documentation_tab():
-    st.header("Documentation")
     api_list = get_api_list()
-    selected_api = st.selectbox("Select an API for documentation", api_list, format_func=lambda x: x[1])
-    if selected_api:
-        doc_text = fetch_documentation_from_url(selected_api[1])
-        st.text_area("API Documentation", doc_text, height=400)  # Increased height
+    if api_list:
+        selected_api = st.selectbox("Select an API for documentation", api_list, format_func=lambda x: x[1])
+        if selected_api:
+            knowledge_base = get_knowledge_base(selected_api[0])
+            if knowledge_base:
+                st.write("**Knowledge Base:**")
+                st.json(knowledge_base)
+            else:
+                st.info("Knowledge base not found for the selected API.")
+    else:
+        st.info("No APIs available. Please add one in the 'Manage APIs' tab.")
 
 if __name__ == "__main__":
     main()
