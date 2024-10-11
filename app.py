@@ -7,6 +7,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import re
+import docx  # For reading .docx files
 
 # Initialize the client variable
 client = None
@@ -103,7 +104,7 @@ def build_knowledge_base(doc_text):
     """Use GPT to generate a structured knowledge base from the provided documentation text."""
     combined_content = (
         "You are an AI assistant who translates API documentation into a knowledge base. Your reply is always in JSON format only, no other comments.\n\n"
-        f"Analyze the following API documentation and extract the base URL, request methods, parameters, and authentication methods in JSON format:\n\n{doc_text}"
+        f"Analyze the following API documentation and extract the base URL, endpoint, request methods, parameters, and authentication methods in JSON format:\n\n{doc_text}"
     )
 
     messages = [
@@ -391,18 +392,51 @@ def talk_to_api_tab():
     # Reset the query input field after submission to allow new query
     st.session_state['user_query'] = ''  # Clear user query after submission
 
+
+# Function to read text from a .docx file
+def read_docx(file):
+    doc = docx.Document(file)
+    return "\n".join([para.text for para in doc.paragraphs])
+
 # Function for 'Manage APIs' tab
 def manage_apis_tab():
-    # Add new API
-    new_api_url = st.text_input("Enter API documentation URL:")
+    # Create two columns for the URL input and file uploader
+    col1, col2 = st.columns([2, 2])  # Adjust the size of the columns if needed
+    
+    with col1:
+        new_api_url = st.text_input("Enter API documentation URL:")
+
+    with col2:
+        uploaded_file = st.file_uploader("Upload API documentation (.docx or .txt)", type=['docx', 'txt'])
+
+    # Add button below the input fields
     if st.button("Add API"):
-        doc_text = fetch_documentation_from_url(new_api_url)
+        if new_api_url:
+            doc_text = fetch_documentation_from_url(new_api_url)
+        elif uploaded_file is not None:
+            if uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                doc_text = read_docx(uploaded_file)
+            elif uploaded_file.type == "text/plain":
+                doc_text = str(uploaded_file.read(), "utf-8")
+        else:
+            st.error("Please provide either a URL or upload a file.")
+            return  # Early return if no input provided
+
+        # Build knowledge base from the provided text
         knowledge_base = build_knowledge_base(doc_text)
         if knowledge_base:
-            save_api_to_db(new_api_url, knowledge_base)
-            st.success(f"Added API: {new_api_url}")
+            source = new_api_url if new_api_url else "Uploaded File"
+            save_api_to_db(source, knowledge_base)
+            st.success(f"Added API: {source}")
         else:
             st.error("Failed to build knowledge base. Ensure the API documentation contains the base URL.")
+
+    # Display available APIs
+    api_list = get_api_list()
+    if api_list:
+        # Create a dataframe-like structure with the API list
+        formatted_api_list = [{"ID": api[0], "URL": api[1]} for api in api_list]
+        st.dataframe(formatted_api_list)
 
     # Display available APIs
     api_list = get_api_list()
