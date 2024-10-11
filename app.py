@@ -20,8 +20,6 @@ load_dotenv()
 api_key_env = os.getenv("OPENAI_API_KEY", "")
 
 # Initialize session state variables if not already set
-if 'api_list' not in st.session_state:
-    st.session_state['api_list'] = []  # Initialize with an empty list
 if 'selected_api' not in st.session_state:
     st.session_state['selected_api'] = None
 if 'api_key' not in st.session_state:
@@ -61,7 +59,9 @@ def initialize_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS apis (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT,
+            api_name TEXT,
+            short_description TEXT,
+            base_url TEXT,
             knowledge_base JSON
         )
     ''')
@@ -104,7 +104,15 @@ def build_knowledge_base(doc_text):
     """Use GPT to generate a structured knowledge base from the provided documentation text."""
     combined_content = (
         "You are an AI assistant who translates API documentation into a knowledge base. Your reply is always in JSON format only, no other comments.\n\n"
-        f"Analyze the following API documentation and extract the base URL, endpoint, request methods, parameters, and authentication methods in JSON format:\n\n{doc_text}"
+        "Analyze the following API documentation and extract the following fields in JSON format:\n"
+        "- api_name: The name of the API\n"
+        "- short_description: A brief description of what the API does, max 60 characters\n"
+        "- base_url: The base URL for the API\n"
+        "- endpoint: The primary endpoint for the API\n"
+        "- request_methods: List of HTTP methods supported\n"
+        "- parameters: Parameters accepted by the API\n"
+        "- authentication_methods: Authentication methods required\n\n"
+        f"API Documentation:\n{doc_text}"
     )
 
     messages = [
@@ -142,18 +150,29 @@ def build_knowledge_base(doc_text):
     return knowledge_base
 
 def save_api_to_db(api_url, knowledge_base):
-    """Save the API URL and knowledge base to the SQLite database."""
+    """Save the API data and knowledge base to the SQLite database."""
+    # Extract 'api_name', 'short_description', 'base_url' from knowledge_base
+    api_name = knowledge_base.get('api_name', 'Unknown API')
+    short_description = knowledge_base.get('short_description', '')
+    base_url = knowledge_base.get('base_url', api_url)  # Fallback to api_url if 'base_url' not found
+
     conn = sqlite3.connect('apis.db', detect_types=sqlite3.PARSE_DECLTYPES)
     c = conn.cursor()
-    c.execute("INSERT INTO apis (url, knowledge_base) VALUES (?, ?)", (api_url, knowledge_base))
+    c.execute(
+        "INSERT INTO apis (api_name, short_description, base_url, knowledge_base) VALUES (?, ?, ?, ?)",
+        (api_name, short_description, base_url, json.dumps(knowledge_base))  # Ensure JSON serialization
+    )
     conn.commit()
     conn.close()
+
+    # Optional: Add a debug statement to confirm saving
+    add_debug_info(f"API '{api_name}' saved successfully with base URL '{base_url}'.")
 
 def get_api_list():
     """Retrieve the list of APIs from the database."""
     conn = sqlite3.connect('apis.db')
     c = conn.cursor()
-    c.execute("SELECT id, url FROM apis")
+    c.execute("SELECT id, api_name, short_description, base_url FROM apis")
     result = c.fetchall()
     conn.close()
     return result
@@ -239,7 +258,7 @@ def create_api_call(knowledge_base, params):
         return {"success": False, "error": "Missing base_url"}
 
     # Construct the full API URL
-    api_url = base_url + endpoint
+    api_url = base_url.rstrip('/') + '/' + endpoint.lstrip('/')
 
     method = knowledge_base.get('request_methods', ['GET'])[0].upper()
     headers = knowledge_base.get('headers', {})
@@ -325,10 +344,10 @@ def talk_to_api_tab():
     if 'user_query' not in st.session_state:
         st.session_state['user_query'] = ''
 
-    # Show available APIs
+    # Fetch the latest API list from the database
     api_list = get_api_list()
     if api_list:
-        api_selection = st.selectbox("Select an API", api_list, format_func=lambda x: x[1])
+        api_selection = st.selectbox("Select an API", api_list, format_func=lambda api: f"{api[1]}")
         st.session_state['selected_api'] = api_selection[0]
     else:
         st.info("No APIs available. Please add one in the 'Manage APIs' tab.")
@@ -392,7 +411,6 @@ def talk_to_api_tab():
     # Reset the query input field after submission to allow new query
     st.session_state['user_query'] = ''  # Clear user query after submission
 
-
 # Function to read text from a .docx file
 def read_docx(file):
     doc = docx.Document(file)
@@ -400,14 +418,30 @@ def read_docx(file):
 
 # Function for 'Manage APIs' tab
 def manage_apis_tab():
+    # Display available APIs
+    api_list = get_api_list()
+    if api_list:
+        # Create a dataframe-like structure with the API list
+        formatted_api_list = [
+            {
+                "ID": api[0],
+                "API Name": api[1],
+                "Short Description": api[2],
+                "Base URL": api[3]
+            } for api in api_list
+        ]
+        st.dataframe(formatted_api_list)
+    else:
+        st.info("No APIs available. Please add one using the form above.")
+
     # Create two columns for the URL input and file uploader
     col1, col2 = st.columns([2, 2])  # Adjust the size of the columns if needed
-    
+
     with col1:
-        new_api_url = st.text_input("Enter API documentation URL:")
+        uploaded_file = st.file_uploader("Upload API documentation (.docx or .txt)", type=['docx', 'txt'])
 
     with col2:
-        uploaded_file = st.file_uploader("Upload API documentation (.docx or .txt)", type=['docx', 'txt'])
+        new_api_url = st.text_input("Enter API documentation URL:")
 
     # Add button below the input fields
     if st.button("Add API"):
@@ -417,7 +451,7 @@ def manage_apis_tab():
             if uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
                 doc_text = read_docx(uploaded_file)
             elif uploaded_file.type == "text/plain":
-                doc_text = str(uploaded_file.read(), "utf-8")
+                doc_text = uploaded_file.read().decode("utf-8")
         else:
             st.error("Please provide either a URL or upload a file.")
             return  # Early return if no input provided
@@ -428,22 +462,9 @@ def manage_apis_tab():
             source = new_api_url if new_api_url else "Uploaded File"
             save_api_to_db(source, knowledge_base)
             st.success(f"Added API: {source}")
+            # No need to use st.experimental_rerun()
         else:
             st.error("Failed to build knowledge base. Ensure the API documentation contains the base URL.")
-
-    # Display available APIs
-    api_list = get_api_list()
-    if api_list:
-        # Create a dataframe-like structure with the API list
-        formatted_api_list = [{"ID": api[0], "URL": api[1]} for api in api_list]
-        st.dataframe(formatted_api_list)
-
-    # Display available APIs
-    api_list = get_api_list()
-    if api_list:
-        # Create a dataframe-like structure with the API list
-        formatted_api_list = [{"ID": api[0], "URL": api[1]} for api in api_list]
-        st.dataframe(formatted_api_list)
 
 # Function for 'Search APIs' tab
 def search_apis_tab():
@@ -454,7 +475,7 @@ def search_apis_tab():
         if search_results:
             st.write(f"Search results for '{search_query}':")
             for api in search_results:
-                st.write(api[1])
+                st.write(f"**{api[1]}** - {api[2]}\n_Base URL_: {api[3]}")
         else:
             st.info("No APIs match your search query.")
     else:
@@ -464,7 +485,7 @@ def search_apis_tab():
 def documentation_tab():
     api_list = get_api_list()
     if api_list:
-        selected_api = st.selectbox("Select an API for documentation", api_list, format_func=lambda x: x[1])
+        selected_api = st.selectbox("Select an API for documentation", api_list, format_func=lambda x: f"{x[1]} - {x[2]}")
         if selected_api:
             knowledge_base = get_knowledge_base(selected_api[0])
             if knowledge_base:
