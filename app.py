@@ -462,7 +462,9 @@ def manage_apis_tab():
             source = new_api_url if new_api_url else "Uploaded File"
             save_api_to_db(source, knowledge_base)
             st.success(f"Added API: {source}")
-            # No need to use st.experimental_rerun()
+            
+            # Rerun the app to reflect the changes in the API list
+            st.rerun()  # Force a page refresh to update the API list
         else:
             st.error("Failed to build knowledge base. Ensure the API documentation contains the base URL.")
 
