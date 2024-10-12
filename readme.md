@@ -26,7 +26,7 @@ AskAPI is a Streamlit app that lets you interact with any API using natural lang
 
 3. Set up your OpenAI API key:
    - Create a `.env` file in the root directory of your project.
-   - Add your OpenAI API key to the file:
+   - Add your [AI/ML API](https://aimlapi.com) key to the file:
      ```
      OPENAI_API_KEY=your_openai_api_key
      ```
@@ -38,5 +38,3 @@ AskAPI is a Streamlit app that lets you interact with any API using natural lang
 
 5. Use the app to interact with APIs by entering a query, selecting an API, and viewing the responses.
 
-## License
-MIT License
