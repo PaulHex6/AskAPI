@@ -33,12 +33,12 @@ st.sidebar.markdown("**AskAPI** lets you interact with any API using natural lan
 
 # Sidebar: Show API key input only if not already provided
 if not st.session_state['api_key']:
-    st.sidebar.markdown("Please enter your OpenAI API key:")
+    st.sidebar.markdown("Please enter your AI/ML API key:")
     st.session_state['api_key'] = st.sidebar.text_input(
         "API Key",
         type="password",
         value='',
-        placeholder="sk-..."
+        placeholder="..."
     )
 
 # Register JSON adapter and converter for SQLite
